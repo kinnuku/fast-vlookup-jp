@@ -236,6 +236,106 @@
     color: var(--text-secondary);
   }
   .status.error { color: var(--danger); }
+
+  /* ---------- Progress ---------- */
+  .progress-area {
+    margin-top: 1rem;
+    padding: 16px 18px;
+    background: var(--bg-secondary);
+    border: 0.5px solid var(--border);
+    border-radius: 10px;
+    animation: progressFadeIn 0.25s ease-out;
+  }
+  @keyframes progressFadeIn {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .progress-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+    margin-bottom: 10px;
+  }
+  .progress-phase {
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+  }
+  .progress-percent {
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+  .progress-bar-outer {
+    width: 100%;
+    height: 8px;
+    background: var(--bg-tertiary);
+    border-radius: 999px;
+    overflow: hidden;
+    position: relative;
+  }
+  .progress-bar-inner {
+    height: 100%;
+    width: 0%;
+    background: linear-gradient(90deg, var(--accent), #e08868);
+    border-radius: 999px;
+    transition: width 0.2s ease-out;
+    position: relative;
+  }
+  .progress-bar-inner::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg,
+      transparent 0%,
+      rgba(255,255,255,0.35) 50%,
+      transparent 100%);
+    animation: progressShimmer 1.6s infinite;
+  }
+  @keyframes progressShimmer {
+    0% { transform: translateX(-100%); }
+    100% { transform: translateX(100%); }
+  }
+  .progress-bar-inner.done::after { display: none; }
+  .progress-meta {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 8px 16px;
+    margin-top: 12px;
+    font-size: 12px;
+  }
+  @media (max-width: 640px) {
+    .progress-meta { grid-template-columns: repeat(2, 1fr); }
+  }
+  .meta-item {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .meta-label {
+    color: var(--text-tertiary);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+  }
+  .meta-value {
+    color: var(--text);
+    font-weight: 500;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  .meta-value-muted {
+    color: var(--text-secondary);
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+  .meta-sep {
+    color: var(--text-tertiary);
+  }
+
   .preview {
     margin-top: 1rem;
     border: 0.5px solid var(--border);
@@ -423,9 +523,41 @@
     </div>
     <div class="btn-row">
       <button class="btn" id="run-btn" disabled>結合を実行</button>
+      <button class="btn btn-secondary hidden" id="cancel-btn">中止</button>
       <button class="btn btn-secondary hidden" id="download-xlsx">Excelで保存 (.xlsx)</button>
       <button class="btn btn-secondary hidden" id="download-csv">CSVで保存 (.csv)</button>
       <span class="status" id="status"></span>
+    </div>
+
+    <!-- Progress UI -->
+    <div id="progress-area" class="hidden progress-area">
+      <div class="progress-header">
+        <div class="progress-phase" id="progress-phase">準備中...</div>
+        <div class="progress-percent" id="progress-percent">0%</div>
+      </div>
+      <div class="progress-bar-outer">
+        <div class="progress-bar-inner" id="progress-bar-inner"></div>
+      </div>
+      <div class="progress-meta">
+        <div class="meta-item">
+          <span class="meta-label">処理済み</span>
+          <span class="meta-value" id="meta-done">0</span>
+          <span class="meta-sep">/</span>
+          <span class="meta-value-muted" id="meta-total">0</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">経過</span>
+          <span class="meta-value" id="meta-elapsed">0秒</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">残り</span>
+          <span class="meta-value" id="meta-eta">計算中...</span>
+        </div>
+        <div class="meta-item">
+          <span class="meta-label">速度</span>
+          <span class="meta-value" id="meta-speed">—</span>
+        </div>
+      </div>
     </div>
 
     <div id="result-area" class="hidden">
@@ -614,69 +746,192 @@
     return s;
   }
 
-  function runJoin() {
+  // ---------- Progress helpers ----------
+  const progress = {
+    cancelled: false,
+    startTime: 0,
+    phaseStartTime: 0,
+    phaseStartProcessed: 0,
+    rafId: null,
+    lastDisplay: 0,
+  };
+
+  function fmtDuration(ms) {
+    if (!isFinite(ms) || ms < 0) return '—';
+    const s = Math.round(ms / 1000);
+    if (s < 60) return s + '秒';
+    const m = Math.floor(s / 60);
+    const rs = s % 60;
+    if (m < 60) return m + '分' + (rs ? rs + '秒' : '');
+    const h = Math.floor(m / 60);
+    const rm = m % 60;
+    return h + '時間' + (rm ? rm + '分' : '');
+  }
+
+  function fmtSpeed(rowsPerSec) {
+    if (!isFinite(rowsPerSec) || rowsPerSec <= 0) return '—';
+    if (rowsPerSec >= 1000000) return (rowsPerSec / 1000000).toFixed(1) + 'M行/秒';
+    if (rowsPerSec >= 1000) return (rowsPerSec / 1000).toFixed(1) + 'K行/秒';
+    return Math.round(rowsPerSec) + '行/秒';
+  }
+
+  function showProgress(phase) {
+    document.getElementById('progress-area').classList.remove('hidden');
+    document.getElementById('cancel-btn').classList.remove('hidden');
+    setPhase(phase);
+    progress.startTime = performance.now();
+    progress.phaseStartTime = progress.startTime;
+    progress.phaseStartProcessed = 0;
+    progress.cancelled = false;
+    updateProgress(0, 0);
+  }
+
+  function hideProgress() {
+    document.getElementById('progress-area').classList.add('hidden');
+    document.getElementById('cancel-btn').classList.add('hidden');
+    const bar = document.getElementById('progress-bar-inner');
+    bar.classList.remove('done');
+    bar.style.width = '0%';
+  }
+
+  function setPhase(text) {
+    document.getElementById('progress-phase').textContent = text;
+    progress.phaseStartTime = performance.now();
+    progress.phaseStartProcessed = 0;
+  }
+
+  function updateProgress(done, total) {
+    const now = performance.now();
+    // throttle DOM updates to ~30fps to avoid blocking
+    if (now - progress.lastDisplay < 33 && done !== total && done !== 0) return;
+    progress.lastDisplay = now;
+
+    const pct = total > 0 ? Math.min(100, (done / total) * 100) : 0;
+    document.getElementById('progress-bar-inner').style.width = pct.toFixed(1) + '%';
+    document.getElementById('progress-percent').textContent = pct.toFixed(1) + '%';
+    document.getElementById('meta-done').textContent = done.toLocaleString();
+    document.getElementById('meta-total').textContent = total.toLocaleString();
+
+    const elapsed = now - progress.startTime;
+    document.getElementById('meta-elapsed').textContent = fmtDuration(elapsed);
+
+    // Speed/ETA based on current phase only (more accurate)
+    const phaseElapsed = now - progress.phaseStartTime;
+    const phaseDone = done - progress.phaseStartProcessed;
+    if (phaseElapsed > 200 && phaseDone > 0) {
+      const speed = phaseDone / (phaseElapsed / 1000);
+      document.getElementById('meta-speed').textContent = fmtSpeed(speed);
+      const remaining = total - done;
+      if (remaining > 0 && speed > 0) {
+        document.getElementById('meta-eta').textContent = fmtDuration(remaining / speed * 1000);
+      } else {
+        document.getElementById('meta-eta').textContent = '—';
+      }
+    }
+  }
+
+  function finishProgress() {
+    document.getElementById('progress-bar-inner').style.width = '100%';
+    document.getElementById('progress-bar-inner').classList.add('done');
+    document.getElementById('progress-percent').textContent = '100%';
+    document.getElementById('meta-eta').textContent = '完了';
+    document.getElementById('cancel-btn').classList.add('hidden');
+  }
+
+  // Yield to the browser so UI can repaint
+  function yieldToUI() {
+    return new Promise(resolve => setTimeout(resolve, 0));
+  }
+
+  async function runJoin() {
     const startTime = performance.now();
     const statusEl = document.getElementById('status');
-    statusEl.textContent = '処理中...';
+    const runBtn = document.getElementById('run-btn');
+    statusEl.textContent = '';
     statusEl.classList.remove('error');
+    runBtn.disabled = true;
+    document.getElementById('result-area').classList.add('hidden');
+    document.getElementById('download-xlsx').classList.add('hidden');
+    document.getElementById('download-csv').classList.add('hidden');
 
-    // Defer to allow UI update
-    setTimeout(() => {
-      try {
-        const key1Idx = parseInt(document.getElementById('key1').value);
-        const key2Idx = parseInt(document.getElementById('key2').value);
-        const opts = {
-          trim: document.getElementById('opt-trim').checked,
-          caseInsensitive: document.getElementById('opt-case').checked,
-          string: document.getElementById('opt-string').checked
-        };
-        const fetchCols = Array.from(document.querySelectorAll('.col-fetch:checked'))
-          .map(cb => parseInt(cb.value));
+    showProgress('準備中...');
 
-        // Build hash map from file2
-        const lookup = new Map();
-        const f2rows = state.file2.rows;
-        for (let i = 0; i < f2rows.length; i++) {
-          const key = normalizeKey(f2rows[i][key2Idx], opts);
+    try {
+      const key1Idx = parseInt(document.getElementById('key1').value);
+      const key2Idx = parseInt(document.getElementById('key2').value);
+      const opts = {
+        trim: document.getElementById('opt-trim').checked,
+        caseInsensitive: document.getElementById('opt-case').checked,
+        string: document.getElementById('opt-string').checked
+      };
+      const fetchCols = Array.from(document.querySelectorAll('.col-fetch:checked'))
+        .map(cb => parseInt(cb.value));
+
+      const f2rows = state.file2.rows;
+      const f1rows = state.file1.rows;
+      const fetchHeaders = fetchCols.map(i => state.file2.headers[i]);
+      const resultHeaders = [...state.file1.headers, ...fetchHeaders];
+      const f1HeaderLen = state.file1.headers.length;
+
+      // ---- Phase 1: Build hash map from file2 ----
+      setPhase('参照テーブルのインデックスを構築中');
+      const lookup = new Map();
+      const CHUNK = 20000;
+      for (let i = 0; i < f2rows.length; i += CHUNK) {
+        if (progress.cancelled) throw new Error('中止されました');
+        const end = Math.min(i + CHUNK, f2rows.length);
+        for (let j = i; j < end; j++) {
+          const key = normalizeKey(f2rows[j][key2Idx], opts);
           if (key === '') continue;
-          // First-match wins (standard VLOOKUP behavior)
-          if (!lookup.has(key)) lookup.set(key, f2rows[i]);
+          if (!lookup.has(key)) lookup.set(key, f2rows[j]);
         }
-
-        // Walk file1 and append
-        const f1rows = state.file1.rows;
-        const fetchHeaders = fetchCols.map(i => state.file2.headers[i]);
-        const resultHeaders = [...state.file1.headers, ...fetchHeaders];
-        const resultRows = new Array(f1rows.length);
-        let matched = 0;
-        for (let i = 0; i < f1rows.length; i++) {
-          const key = normalizeKey(f1rows[i][key1Idx], opts);
-          const match = key === '' ? null : lookup.get(key);
-          const fetched = match
-            ? fetchCols.map(c => match[c] != null ? match[c] : '')
-            : fetchCols.map(() => '');
-          if (match) matched++;
-          // Build full row at fixed length
-          const fullRow = new Array(resultHeaders.length);
-          for (let j = 0; j < state.file1.headers.length; j++) {
-            fullRow[j] = f1rows[i][j] != null ? f1rows[i][j] : '';
-          }
-          for (let j = 0; j < fetched.length; j++) {
-            fullRow[state.file1.headers.length + j] = fetched[j];
-          }
-          resultRows[i] = fullRow;
-        }
-
-        const elapsed = performance.now() - startTime;
-        state.result = { headers: resultHeaders, rows: resultRows, matched, total: f1rows.length, elapsed };
-
-        renderResult();
-        statusEl.textContent = '完了';
-      } catch (err) {
-        statusEl.textContent = 'エラー: ' + err.message;
-        statusEl.classList.add('error');
+        updateProgress(end, f2rows.length);
+        await yieldToUI();
       }
-    }, 30);
+
+      // ---- Phase 2: Walk file1 and append ----
+      setPhase('マッチング中');
+      const resultRows = new Array(f1rows.length);
+      let matched = 0;
+      for (let i = 0; i < f1rows.length; i += CHUNK) {
+        if (progress.cancelled) throw new Error('中止されました');
+        const end = Math.min(i + CHUNK, f1rows.length);
+        for (let j = i; j < end; j++) {
+          const key = normalizeKey(f1rows[j][key1Idx], opts);
+          const match = key === '' ? null : lookup.get(key);
+          if (match) matched++;
+          const fullRow = new Array(resultHeaders.length);
+          for (let k = 0; k < f1HeaderLen; k++) {
+            fullRow[k] = f1rows[j][k] != null ? f1rows[j][k] : '';
+          }
+          for (let k = 0; k < fetchCols.length; k++) {
+            const v = match ? match[fetchCols[k]] : '';
+            fullRow[f1HeaderLen + k] = v != null ? v : '';
+          }
+          resultRows[j] = fullRow;
+        }
+        updateProgress(end, f1rows.length);
+        await yieldToUI();
+      }
+
+      const elapsed = performance.now() - startTime;
+      state.result = { headers: resultHeaders, rows: resultRows, matched, total: f1rows.length, elapsed };
+
+      finishProgress();
+      // brief pause so user sees "100%"
+      await new Promise(r => setTimeout(r, 400));
+      hideProgress();
+      renderResult();
+      statusEl.textContent = '完了 (' + fmtDuration(elapsed) + ')';
+    } catch (err) {
+      hideProgress();
+      statusEl.textContent = err.message === '中止されました'
+        ? '中止しました'
+        : 'エラー: ' + err.message;
+      if (err.message !== '中止されました') statusEl.classList.add('error');
+    } finally {
+      runBtn.disabled = false;
+    }
   }
 
   function renderResult() {
@@ -702,40 +957,108 @@
     document.getElementById('preview').innerHTML = html;
   }
 
-  function downloadXlsx() {
+  async function downloadXlsx() {
     const r = state.result;
-    const aoa = [r.headers, ...r.rows];
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, '結果');
-    XLSX.writeFile(wb, 'vlookup_結果.xlsx');
+    const statusEl = document.getElementById('status');
+    statusEl.textContent = '';
+    statusEl.classList.remove('error');
+    const startTime = performance.now();
+
+    showProgress('Excelファイルを準備中');
+    try {
+      // aoa_to_sheet is synchronous and the heavy step; we can't chunk it,
+      // but we still show a progress UI with indeterminate state for the build step.
+      updateProgress(0, r.rows.length);
+      await yieldToUI();
+
+      setPhase('シートを生成中 (少し時間がかかります)');
+      // Pulse the bar visually while the sync work runs
+      document.getElementById('progress-bar-inner').style.width = '50%';
+      document.getElementById('progress-percent').textContent = '...';
+      await yieldToUI();
+
+      const aoa = [r.headers, ...r.rows];
+      const ws = XLSX.utils.aoa_to_sheet(aoa);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, '結果');
+
+      setPhase('ファイルを書き出し中');
+      document.getElementById('progress-bar-inner').style.width = '85%';
+      await yieldToUI();
+
+      XLSX.writeFile(wb, 'vlookup_結果.xlsx');
+
+      finishProgress();
+      await new Promise(res => setTimeout(res, 400));
+      hideProgress();
+      statusEl.textContent = 'Excel保存完了 (' + fmtDuration(performance.now() - startTime) + ')';
+    } catch (err) {
+      hideProgress();
+      statusEl.textContent = 'エラー: ' + err.message;
+      statusEl.classList.add('error');
+    }
   }
 
-  function downloadCsv() {
+  async function downloadCsv() {
     const r = state.result;
-    const esc = (v) => {
-      const s = String(v == null ? '' : v);
-      if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
-      return s;
-    };
-    const lines = [r.headers.map(esc).join(',')];
-    for (let i = 0; i < r.rows.length; i++) {
-      lines.push(r.rows[i].map(esc).join(','));
+    const statusEl = document.getElementById('status');
+    statusEl.textContent = '';
+    statusEl.classList.remove('error');
+    const startTime = performance.now();
+
+    showProgress('CSVを生成中');
+
+    try {
+      const esc = (v) => {
+        const s = String(v == null ? '' : v);
+        if (/[",\n\r]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+        return s;
+      };
+
+      const total = r.rows.length;
+      const CHUNK = 20000;
+      const parts = ['\uFEFF', r.headers.map(esc).join(',')];
+
+      for (let i = 0; i < total; i += CHUNK) {
+        if (progress.cancelled) throw new Error('中止されました');
+        const end = Math.min(i + CHUNK, total);
+        const lines = [];
+        for (let j = i; j < end; j++) {
+          lines.push(r.rows[j].map(esc).join(','));
+        }
+        parts.push('\r\n' + lines.join('\r\n'));
+        updateProgress(end, total);
+        await yieldToUI();
+      }
+
+      setPhase('ファイルを書き出し中');
+      const blob = new Blob(parts, { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'vlookup_結果.csv';
+      a.click();
+      URL.revokeObjectURL(url);
+
+      finishProgress();
+      await new Promise(res => setTimeout(res, 400));
+      hideProgress();
+      statusEl.textContent = 'CSV保存完了 (' + fmtDuration(performance.now() - startTime) + ')';
+    } catch (err) {
+      hideProgress();
+      statusEl.textContent = err.message === '中止されました' ? '中止しました' : 'エラー: ' + err.message;
+      if (err.message !== '中止されました') statusEl.classList.add('error');
     }
-    // BOM for Excel Japanese compatibility
-    const blob = new Blob(['\uFEFF' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = 'vlookup_結果.csv';
-    a.click();
-    URL.revokeObjectURL(url);
   }
 
   // ---------- Initialize ----------
   setupDrop('drop1', 'file1', 'file1');
   setupDrop('drop2', 'file2', 'file2');
   document.getElementById('run-btn').addEventListener('click', runJoin);
+  document.getElementById('cancel-btn').addEventListener('click', () => {
+    progress.cancelled = true;
+    document.getElementById('progress-phase').textContent = '中止しています...';
+  });
   document.getElementById('download-xlsx').addEventListener('click', downloadXlsx);
   document.getElementById('download-csv').addEventListener('click', downloadCsv);
 })();
