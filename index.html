@@ -178,7 +178,7 @@
     color: var(--text-secondary);
     font-weight: 500;
   }
-  select, input[type="text"] {
+  select, input[type="text"], input[type="number"] {
     background: var(--bg);
     color: var(--text);
     border: 0.5px solid var(--border-strong);
@@ -189,7 +189,7 @@
     outline: none;
     transition: border-color 0.15s;
   }
-  select:focus, input[type="text"]:focus { border-color: var(--accent); }
+  select:focus, input[type="text"]:focus, input[type="number"]:focus { border-color: var(--accent); }
   select:disabled { opacity: 0.5; }
   .checkbox-row {
     display: flex;
@@ -224,6 +224,10 @@
     background: var(--bg);
     color: var(--text);
     border: 0.5px solid var(--border-strong);
+  }
+  .btn-small {
+    padding: 6px 12px;
+    font-size: 12px;
   }
   .btn-row {
     display: flex;
@@ -447,6 +451,16 @@
     padding: 6px;
     font-size: 12px;
   }
+  .multiselect-controls {
+    display: flex;
+    gap: 6px;
+    padding: 6px 0 0 0;
+    border-top: 0.5px solid var(--border);
+    margin-top: 6px;
+  }
+  .multiselect-controls button {
+    flex: 1;
+  }
 </style>
 
 <div class="container">
@@ -463,7 +477,7 @@
       <div class="step-num">1</div>
       <div class="step-title">ファイルを読み込む</div>
     </div>
-    <p class="step-hint">対応形式: Excel (.xlsx, .xls)、CSV、TSV。1行目をヘッダーとして扱います。</p>
+    <p class="step-hint">対応形式: Excel (.xlsx, .xls)、CSV、TSV。</p>
     <div class="file-grid">
       <div>
         <div class="file-label">メインテーブル (左側)</div>
@@ -492,9 +506,30 @@
   <div class="step" id="step2" style="opacity: 0.5; pointer-events: none;">
     <div class="step-header">
       <div class="step-num">2</div>
-      <div class="step-title">結合する列を選ぶ</div>
+      <div class="step-title">シートとヘッダー行を選ぶ</div>
     </div>
     <div class="controls">
+      <div class="field">
+        <label>メインテーブルのシート</label>
+        <select id="sheet1" disabled></select>
+      </div>
+      <div class="field">
+        <label>メインテーブルのヘッダー行</label>
+        <input type="number" id="header1" value="1" min="1" disabled>
+      </div>
+    </div>
+    <div class="controls" style="margin-top: 10px;">
+      <div class="field">
+        <label>参照テーブルのシート</label>
+        <select id="sheet2" disabled></select>
+      </div>
+      <div class="field">
+        <label>参照テーブルのヘッダー行</label>
+        <input type="number" id="header2" value="1" min="1" disabled>
+      </div>
+    </div>
+
+    <div class="controls" style="margin-top: 20px;">
       <div class="field">
         <label>メインテーブルのキー列</label>
         <select id="key1" disabled></select>
@@ -506,7 +541,13 @@
     </div>
     <div class="field" style="margin-top: 10px;">
       <label>参照テーブルから取得する列 (複数選択可)</label>
-      <div class="multiselect" id="cols-to-fetch"><div class="empty">ファイルを読み込んでください</div></div>
+      <div class="multiselect" id="cols-to-fetch">
+        <div class="empty">ファイルを読み込んでください</div>
+      </div>
+      <div class="multiselect-controls">
+        <button class="btn btn-secondary btn-small" id="select-all-btn" onclick="selectAllCols()" disabled>すべて選択</button>
+        <button class="btn btn-secondary btn-small" id="unselect-all-btn" onclick="unselectAllCols()" disabled>すべて解除</button>
+      </div>
     </div>
     <div class="checkbox-row">
       <label><input type="checkbox" id="opt-trim" checked> 前後の空白を無視</label>
@@ -592,8 +633,8 @@
   'use strict';
 
   const state = {
-    file1: null, // { name, headers: [], rows: [[]] }
-    file2: null,
+    fileData1: null, // { name, sheets: { sheetName: { headers, rows } }, allSheets: [] }
+    fileData2: null,
     result: null
   };
 
@@ -605,15 +646,23 @@
       reader.onload = (e) => {
         try {
           const data = new Uint8Array(e.target.result);
-          // SheetJS handles xlsx, xls, csv, tsv, txt
           const wb = XLSX.read(data, { type: 'array', cellDates: false, raw: false });
-          const sheetName = wb.SheetNames[0];
-          const sheet = wb.Sheets[sheetName];
-          const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', blankrows: false, raw: false });
-          if (!aoa.length) throw new Error('空のファイル');
-          const headers = aoa[0].map((h, i) => String(h || `列${i+1}`));
-          const rows = aoa.slice(1);
-          resolve({ name: file.name, headers, rows, size: file.size });
+          
+          const sheets = {};
+          const allSheets = [];
+          
+          wb.SheetNames.forEach(sheetName => {
+            const sheet = wb.Sheets[sheetName];
+            const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '', blankrows: false, raw: false });
+            if (aoa.length > 0) {
+              sheets[sheetName] = aoa;
+              allSheets.push(sheetName);
+            }
+          });
+          
+          if (!allSheets.length) throw new Error('データを含むシートがありません');
+          
+          resolve({ name: file.name, sheets, allSheets, size: file.size });
         } catch (err) {
           reject(err);
         }
@@ -660,7 +709,7 @@
       dropEl.classList.add('has-file');
       contentEl.innerHTML = `
         <div class="file-name">${escapeHtml(parsed.name)}</div>
-        <div class="file-meta">${parsed.rows.length.toLocaleString()}行 · ${parsed.headers.length}列 · ${fmtBytes(parsed.size)}</div>
+        <div class="file-meta">${parsed.allSheets.length}シート · ${fmtBytes(parsed.size)}</div>
       `;
       updateStepStates();
     } catch (err) {
@@ -674,48 +723,87 @@
     return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
+  function getSheetData(fileSlot, sheetName, headerRow) {
+    // headerRow is 1-indexed from user input
+    const aoa = fileSlot.sheets[sheetName];
+    if (!aoa || headerRow < 1 || headerRow > aoa.length) {
+      throw new Error('ヘッダー行が無効です');
+    }
+    const headerIdx = headerRow - 1;
+    const headers = aoa[headerIdx].map((h, i) => String(h || `列${i+1}`));
+    const rows = aoa.slice(headerIdx + 1);
+    return { headers, rows };
+  }
+
   function updateStepStates() {
-    const both = state.file1 && state.file2;
+    const both = state.fileData1 && state.fileData2;
     const step2 = document.getElementById('step2');
     const step3 = document.getElementById('step3');
-    const key1 = document.getElementById('key1');
-    const key2 = document.getElementById('key2');
-    const colsBox = document.getElementById('cols-to-fetch');
 
     if (both) {
       step2.style.opacity = '1';
       step2.style.pointerEvents = 'auto';
       step3.style.opacity = '1';
       step3.style.pointerEvents = 'auto';
-      key1.disabled = false;
-      key2.disabled = false;
+
+      // Populate sheet dropdowns
+      const sheet1 = document.getElementById('sheet1');
+      const sheet2 = document.getElementById('sheet2');
+      sheet1.disabled = false;
+      sheet2.disabled = false;
+      sheet1.innerHTML = state.fileData1.allSheets.map((s, i) => `<option value="${i}">${escapeHtml(s)}</option>`).join('');
+      sheet2.innerHTML = state.fileData2.allSheets.map((s, i) => `<option value="${i}">${escapeHtml(s)}</option>`).join('');
+
+      // Enable header row inputs
+      document.getElementById('header1').disabled = false;
+      document.getElementById('header2').disabled = false;
+
+      // Update key columns and fetch columns when sheet/header changes
+      updateKeyColumns();
+      sheet1.addEventListener('change', updateKeyColumns);
+      sheet2.addEventListener('change', updateKeyColumns);
+      document.getElementById('header1').addEventListener('change', updateKeyColumns);
+      document.getElementById('header2').addEventListener('change', updateKeyColumns);
+
       document.getElementById('run-btn').disabled = false;
-
-      // Populate key dropdowns
-      key1.innerHTML = state.file1.headers.map((h, i) => `<option value="${i}">${escapeHtml(h)}</option>`).join('');
-      key2.innerHTML = state.file2.headers.map((h, i) => `<option value="${i}">${escapeHtml(h)}</option>`).join('');
-
-      // Auto-detect common column name
-      autoMatchKeys();
-
-      // Populate columns to fetch
-      renderColsToFetch();
-      key2.addEventListener('change', renderColsToFetch);
     } else {
       step2.style.opacity = '0.5';
       step2.style.pointerEvents = 'none';
       step3.style.opacity = '0.5';
       step3.style.pointerEvents = 'none';
-      key1.disabled = true;
-      key2.disabled = true;
-      document.getElementById('run-btn').disabled = true;
     }
   }
 
-  function autoMatchKeys() {
-    // Try to find headers with same name
-    const h1 = state.file1.headers.map(h => String(h).trim().toLowerCase());
-    const h2 = state.file2.headers.map(h => String(h).trim().toLowerCase());
+  function updateKeyColumns() {
+    try {
+      const sheetIdx1 = parseInt(document.getElementById('sheet1').value) || 0;
+      const sheetIdx2 = parseInt(document.getElementById('sheet2').value) || 0;
+      const headerRow1 = parseInt(document.getElementById('header1').value) || 1;
+      const headerRow2 = parseInt(document.getElementById('header2').value) || 1;
+
+      const sheetName1 = state.fileData1.allSheets[sheetIdx1];
+      const sheetName2 = state.fileData2.allSheets[sheetIdx2];
+
+      const data1 = getSheetData(state.fileData1, sheetName1, headerRow1);
+      const data2 = getSheetData(state.fileData2, sheetName2, headerRow2);
+
+      const key1 = document.getElementById('key1');
+      const key2 = document.getElementById('key2');
+      key1.disabled = false;
+      key2.disabled = false;
+      key1.innerHTML = data1.headers.map((h, i) => `<option value="${i}">${escapeHtml(h)}</option>`).join('');
+      key2.innerHTML = data2.headers.map((h, i) => `<option value="${i}">${escapeHtml(h)}</option>`).join('');
+
+      autoMatchKeys(data1.headers, data2.headers);
+      renderColsToFetch();
+    } catch (err) {
+      console.error('Error updating key columns:', err);
+    }
+  }
+
+  function autoMatchKeys(headers1, headers2) {
+    const h1 = headers1.map(h => String(h).trim().toLowerCase());
+    const h2 = headers2.map(h => String(h).trim().toLowerCase());
     for (let i = 0; i < h1.length; i++) {
       const j = h2.indexOf(h1[i]);
       if (j !== -1 && h1[i]) {
@@ -727,13 +815,36 @@
   }
 
   function renderColsToFetch() {
-    const keyIdx = parseInt(document.getElementById('key2').value);
-    const box = document.getElementById('cols-to-fetch');
-    box.innerHTML = state.file2.headers.map((h, i) => {
-      if (i === keyIdx) return '';
-      return `<label><input type="checkbox" class="col-fetch" value="${i}" checked> ${escapeHtml(h)}</label>`;
-    }).join('') || '<div class="empty">取得する列がありません</div>';
+    try {
+      const sheetIdx2 = parseInt(document.getElementById('sheet2').value) || 0;
+      const headerRow2 = parseInt(document.getElementById('header2').value) || 1;
+      const sheetName2 = state.fileData2.allSheets[sheetIdx2];
+      const data2 = getSheetData(state.fileData2, sheetName2, headerRow2);
+      const keyIdx = parseInt(document.getElementById('key2').value);
+
+      const box = document.getElementById('cols-to-fetch');
+      const html = data2.headers.map((h, i) => {
+        if (i === keyIdx) return '';
+        return `<label><input type="checkbox" class="col-fetch" value="${i}" checked> ${escapeHtml(h)}</label>`;
+      }).join('') || '<div class="empty">取得する列がありません</div>';
+      box.innerHTML = html;
+
+      // Update button states
+      const hasCheckboxes = document.querySelectorAll('.col-fetch').length > 0;
+      document.getElementById('select-all-btn').disabled = !hasCheckboxes;
+      document.getElementById('unselect-all-btn').disabled = !hasCheckboxes;
+    } catch (err) {
+      console.error('Error rendering cols:', err);
+    }
   }
+
+  window.selectAllCols = function() {
+    document.querySelectorAll('.col-fetch').forEach(cb => cb.checked = true);
+  };
+
+  window.unselectAllCols = function() {
+    document.querySelectorAll('.col-fetch').forEach(cb => cb.checked = false);
+  };
 
   // ---------- Join logic ----------
   function normalizeKey(v, opts) {
@@ -802,7 +913,6 @@
 
   function updateProgress(done, total) {
     const now = performance.now();
-    // throttle DOM updates to ~30fps to avoid blocking
     if (now - progress.lastDisplay < 33 && done !== total && done !== 0) return;
     progress.lastDisplay = now;
 
@@ -815,7 +925,6 @@
     const elapsed = now - progress.startTime;
     document.getElementById('meta-elapsed').textContent = fmtDuration(elapsed);
 
-    // Speed/ETA based on current phase only (more accurate)
     const phaseElapsed = now - progress.phaseStartTime;
     const phaseDone = done - progress.phaseStartProcessed;
     if (phaseElapsed > 200 && phaseDone > 0) {
@@ -838,7 +947,6 @@
     document.getElementById('cancel-btn').classList.add('hidden');
   }
 
-  // Yield to the browser so UI can repaint
   function yieldToUI() {
     return new Promise(resolve => setTimeout(resolve, 0));
   }
@@ -857,6 +965,16 @@
     showProgress('準備中...');
 
     try {
+      const sheetIdx1 = parseInt(document.getElementById('sheet1').value) || 0;
+      const sheetIdx2 = parseInt(document.getElementById('sheet2').value) || 0;
+      const headerRow1 = parseInt(document.getElementById('header1').value) || 1;
+      const headerRow2 = parseInt(document.getElementById('header2').value) || 1;
+      const sheetName1 = state.fileData1.allSheets[sheetIdx1];
+      const sheetName2 = state.fileData2.allSheets[sheetIdx2];
+      
+      const data1 = getSheetData(state.fileData1, sheetName1, headerRow1);
+      const data2 = getSheetData(state.fileData2, sheetName2, headerRow2);
+
       const key1Idx = parseInt(document.getElementById('key1').value);
       const key2Idx = parseInt(document.getElementById('key2').value);
       const opts = {
@@ -867,11 +985,11 @@
       const fetchCols = Array.from(document.querySelectorAll('.col-fetch:checked'))
         .map(cb => parseInt(cb.value));
 
-      const f2rows = state.file2.rows;
-      const f1rows = state.file1.rows;
-      const fetchHeaders = fetchCols.map(i => state.file2.headers[i]);
-      const resultHeaders = [...state.file1.headers, ...fetchHeaders];
-      const f1HeaderLen = state.file1.headers.length;
+      const f2rows = data2.rows;
+      const f1rows = data1.rows;
+      const fetchHeaders = fetchCols.map(i => data2.headers[i]);
+      const resultHeaders = [...data1.headers, ...fetchHeaders];
+      const f1HeaderLen = data1.headers.length;
 
       // ---- Phase 1: Build hash map from file2 ----
       setPhase('参照テーブルのインデックスを構築中');
@@ -918,7 +1036,6 @@
       state.result = { headers: resultHeaders, rows: resultRows, matched, total: f1rows.length, elapsed };
 
       finishProgress();
-      // brief pause so user sees "100%"
       await new Promise(r => setTimeout(r, 400));
       hideProgress();
       renderResult();
@@ -946,7 +1063,6 @@
       ? Math.round(r.elapsed) + ' ms'
       : (r.elapsed / 1000).toFixed(2) + ' s';
 
-    // Preview (first 100 rows)
     const previewRows = r.rows.slice(0, 100);
     const html = `<table>
       <thead><tr>${r.headers.map(h => `<th>${escapeHtml(h)}</th>`).join('')}</tr></thead>
@@ -966,13 +1082,10 @@
 
     showProgress('Excelファイルを準備中');
     try {
-      // aoa_to_sheet is synchronous and the heavy step; we can't chunk it,
-      // but we still show a progress UI with indeterminate state for the build step.
       updateProgress(0, r.rows.length);
       await yieldToUI();
 
       setPhase('シートを生成中 (少し時間がかかります)');
-      // Pulse the bar visually while the sync work runs
       document.getElementById('progress-bar-inner').style.width = '50%';
       document.getElementById('progress-percent').textContent = '...';
       await yieldToUI();
@@ -1052,8 +1165,8 @@
   }
 
   // ---------- Initialize ----------
-  setupDrop('drop1', 'file1', 'file1');
-  setupDrop('drop2', 'file2', 'file2');
+  setupDrop('drop1', 'file1', 'fileData1');
+  setupDrop('drop2', 'file2', 'fileData2');
   document.getElementById('run-btn').addEventListener('click', runJoin);
   document.getElementById('cancel-btn').addEventListener('click', () => {
     progress.cancelled = true;
@@ -1061,5 +1174,6 @@
   });
   document.getElementById('download-xlsx').addEventListener('click', downloadXlsx);
   document.getElementById('download-csv').addEventListener('click', downloadCsv);
+  document.getElementById('key2').addEventListener('change', renderColsToFetch);
 })();
 </script>
