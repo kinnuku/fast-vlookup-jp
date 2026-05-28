@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Background rounded square -->
+  <rect width="64" height="64" rx="14" fill="#c96442"/>
+
+  <!-- Lightning bolt - large and centered for visibility at small sizes -->
+  <path d="M 36 8 L 16 36 L 28 36 L 24 56 L 48 26 L 34 26 L 40 8 Z"
+        fill="#ffd700"
+        stroke="#ffffff"
+        stroke-width="1.5"
+        stroke-linejoin="round"
+        stroke-linecap="round"/>
+</svg>
